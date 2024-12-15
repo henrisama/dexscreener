@@ -1,0 +1,4 @@
+2024-12-14 21:11:45,068 ERROR:Database connection failed: No module named 'psycopg2'
+2024-12-14 21:13:43,302 INFO:Tables created successfully.
+2024-12-14 21:13:44,292 ERROR:Failed to fetch data: 404
+2024-12-14 21:13:44,292 ERROR:No data fetched.
