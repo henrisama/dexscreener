@@ -9,7 +9,7 @@ DATABASE = {
     'database': 'dexscreenerdb'    
 }
 
-API_URL = 'https://api.dexscreener.io/latest/dex/tokens'  # Replace with the actual API endpoint
+API_URL = 'https://api.dexscreener.com/token-profiles/latest/v1'  # Replace with the actual API endpoint
 
 # Filters
 FILTERS = {

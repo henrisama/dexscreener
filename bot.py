@@ -13,18 +13,50 @@ import sys
 import time
 import os
 import json
-import telegram  # python-telegram-bot library
+from telegram import Bot  # python-telegram-bot library
 
 # Setup Logging
-logging.basicConfig(filename='bot.log', level=logging.INFO, format='%(asctime)s %(levelname)s:%(message)s')
+logging.basicConfig(filename='bot.log', level=logging.INFO, 
+                    format='%(asctime)s %(levelname)s:%(message)s')
 
 # Initialize Telegram Bot
-telegram_bot = telegram.Bot(token=TELEGRAM['bot_token'])
+telegram_bot = Bot(token=TELEGRAM['bot_token'])
+
+# Blacklist file path
+BLACKLIST_FILE = 'blacklists.json'
+
+def load_blacklists():
+    """Load blacklists from a JSON file."""
+    try:
+        with open(BLACKLIST_FILE, 'r') as f:
+            data = json.load(f)
+            COIN_BLACKLIST.update(addr.lower() for addr in data.get('coin_blacklist', []))
+            DEV_BLACKLIST.update(addr.lower() for addr in data.get('dev_blacklist', []))
+            logging.info('Blacklists loaded from file.')
+    except FileNotFoundError:
+        logging.info('No existing blacklist file found. Starting fresh.')
+    except Exception as e:
+        logging.error('Error loading blacklists: %s', e)
+
+def save_blacklists():
+    """Save blacklists to a JSON file."""
+    data = {
+        'coin_blacklist': list(COIN_BLACKLIST),
+        'dev_blacklist': list(DEV_BLACKLIST)
+    }
+    try:
+        with open(BLACKLIST_FILE, 'w') as f:
+            json.dump(data, f, indent=4)
+        logging.info('Blacklists saved to file.')
+    except Exception as e:
+        logging.error('Error saving blacklists: %s', e)
 
 def get_engine():
     """Create a database engine."""
     try:
         engine = create_engine(URL.create(**DATABASE))
+
+        logging.info('Database connection established successfully.')
         return engine
     except Exception as e:
         logging.error('Database connection failed: %s', e)
@@ -63,7 +95,8 @@ def fetch_data():
         response = requests.get(API_URL)
         if response.status_code == 200:
             logging.info('Data fetched successfully from Dexscreener.')
-            return response.json()
+            data = response.json()
+            return { 'tokens': data }
         else:
             logging.error('Failed to fetch data: %s', response.status_code)
             return None
@@ -72,30 +105,27 @@ def fetch_data():
         return None
 
 def get_developer_address(token_address):
-    """Get the developer address for a given token using Etherscan API."""
-    import os
-
-    ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY')  # Store your API key as an environment variable
-    ETHERSCAN_API_URL = 'https://api.etherscan.io/api'
-
+    """Get the developer address for a given token using Solscan API."""
+    SOLSCAN_API_URL = f'https://pro-api.solscan.io/v2.0/token/meta'
+    
     params = {
-        'module': 'contract',
-        'action': 'getcontractcreation',
-        'contractaddresses': token_address,
-        'apikey': ETHERSCAN_API_KEY
+        'address': token_address
     }
 
+    headers = {"token":f"API_SOLSCAN={os.environ.get('API_SOLSCAN')}"}
+
     try:
-        response = requests.get(ETHERSCAN_API_URL, params=params)
+        response = requests.get(SOLSCAN_API_URL, params=params, headers=headers)
         data = response.json()
-        if data['status'] == '1' and data['message'] == 'OK':
-            developer_address = data['result'][0]['contractCreator']
+        print(data)
+        if 'creator' in data:
+            developer_address = data['creator']
             return developer_address
         else:
-            logging.warning('Etherscan API error: %s', data['message'])
+            logging.warning('Solscan API did not return owner for token %s.', token_address)
             return None
     except Exception as e:
-        logging.error('Error fetching developer address: %s', e)
+        logging.error('Error fetching developer address from Solscan: %s', e)
         return None
 
 def check_rugcheck(token_address):
@@ -135,41 +165,31 @@ def check_rugcheck(token_address):
         return False
 
 def check_bundled_supply(coin):
-    """Check if the coin's supply is bundled using Etherscan API."""
+    """Check if the coin's supply is bundled using Solscan API."""
     token_address = coin.get('address', '')
-    ETHERSCAN_API_KEY = os.getenv('ETHERSCAN_API_KEY')  # Ensure you have your API key stored securely
-
-    api_url = 'https://api.etherscan.io/api'
+    SOLSCAN_HOLDERS_URL = 'https://public-api.solscan.io/token/holders'
+    
     params = {
-        'module': 'token',
-        'action': 'tokenholderlist',
-        'contractaddress': token_address,
-        'page': 1,
-        'offset': 100,
-        'apikey': ETHERSCAN_API_KEY
+        'tokenAddress': token_address,
+        'limit': 100  # Adjust as needed
     }
 
     try:
-        response = requests.get(api_url, params=params)
+        response = requests.get(SOLSCAN_HOLDERS_URL, params=params)
         if response.status_code == 200:
             data = response.json()
-            if data['status'] == '1':
-                holders = data['result']
-                total_supply = coin.get('totalSupply', 0)
-                if total_supply == 0:
-                    return False  # Cannot determine without total supply
+            total_supply = float(coin.get('totalSupply', 0))
+            if total_supply == 0:
+                return False  # Cannot determine without total supply
 
-                # Calculate percentage of supply held by top holders
-                top_holders_supply = sum(float(holder['Balance']) for holder in holders[:5])
-                percentage = (top_holders_supply / float(total_supply)) * 100
+            # Calculate percentage of supply held by top holders
+            top_holders_supply = sum(float(holder['balance']) for holder in data[:5])
+            percentage = (top_holders_supply / total_supply) * 100
 
-                if percentage > 50:  # If top 5 holders hold more than 50%
-                    return True  # Bundled supply detected
-            else:
-                logging.error('Etherscan API error: %s', data['message'])
-                return False
+            if percentage > 50:  # If top 5 holders hold more than 50%
+                return True  # Bundled supply detected
         else:
-            logging.error('Etherscan API request failed with status code: %s', response.status_code)
+            logging.error('Solscan API error while fetching holders: %s', response.status_code)
             return False
     except Exception as e:
         logging.error('Exception in check_bundled_supply: %s', e)
@@ -263,13 +283,13 @@ def apply_filters(coin):
         return False
 
     # Check Coin Blacklist
-    if token_address in (addr.lower() for addr in COIN_BLACKLIST):
+    if token_address in COIN_BLACKLIST:
         logging.info('Coin %s is in the blacklist. Skipping...', token_address)
         return False
 
     # Check Developer Blacklist
     developer_address = get_developer_address(token_address)
-    if developer_address and developer_address.lower() in (addr.lower() for addr in DEV_BLACKLIST):
+    if developer_address and developer_address.lower() in DEV_BLACKLIST:
         logging.info('Developer %s is blacklisted. Skipping coin %s...', developer_address, token_address)
         return False
 
@@ -442,15 +462,25 @@ def process_data(data, engine):
 def main():
     engine = get_engine()
     create_tables(engine)
+    load_blacklists()
 
-    while True:
-        data = fetch_data()
-        if data:
-            process_data(data, engine)
-        else:
-            logging.error('No data fetched.')
-        # Wait for 1 hour before next fetch
-        time.sleep(3600)
+    try:
+        while True:
+            data = fetch_data()
+            if data:
+                process_data(data, engine)
+            else:
+                logging.error('No data fetched.')
+            # Wait for 1 hour before next fetch
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        save_blacklists()
+        logging.info('Bot stopped by user.')
+        sys.exit(0)
+    except Exception as e:
+        logging.error('Unexpected error: %s', e)
+        save_blacklists()
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()
