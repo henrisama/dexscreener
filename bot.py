@@ -8,12 +8,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine.url import URL
 from datetime import datetime
 from config import (DATABASE, API_URL, FILTERS, COIN_BLACKLIST, DEV_BLACKLIST,
-                    POCKET_UNIVERSE, RUGCHECK, TELEGRAM, BONKBOT, TRADING)
+                    POCKET_UNIVERSE, RUGCHECK, TELEGRAM, BONKBOT, TRADING, SOLANA)
 import sys
 import time
 import os
 import json
 from telegram import Bot  # python-telegram-bot library
+
+from solana.rpc.api import Client
+from solana.publickey import PublicKey
+from solana.rpc.core import RPCException
 
 # Setup Logging
 logging.basicConfig(filename='bot.log', level=logging.INFO, 
@@ -105,25 +109,24 @@ def fetch_data():
         return None
 
 def get_developer_address(token_address):
-    """Get the developer address for a given token using Solscan API."""
-    SOLSCAN_API_URL = f'https://pro-api.solscan.io/v2.0/token/meta'
-    
-    params = {
-        'address': token_address
-    }
-
-    headers = {"token":f"API_SOLSCAN={os.environ.get('API_SOLSCAN')}"}
-
     try:
-        response = requests.get(SOLSCAN_API_URL, params=params, headers=headers)
-        data = response.json()
-        print(data)
-        if 'creator' in data:
-            developer_address = data['creator']
-            return developer_address
-        else:
-            logging.warning('Solscan API did not return owner for token %s.', token_address)
+        client = Client(SOLANA.get('url'))
+
+        # Validate and create a PublicKey object
+        contract_pubkey = PublicKey(token_address)
+
+        # Fetch account information
+        response = client.get_account_info(contract_pubkey)
+
+        if not response['result']['value']:
+            logging.error(f"Error: No account found for address {contract_address}")
             return None
+        
+         # Extract owner information
+        owner_pubkey = response['result']['value']['owner']
+
+        logging.info(f"Owner of contract {contract_address}: {owner_pubkey}")
+        return owner_pubkey
     except Exception as e:
         logging.error('Error fetching developer address from Solscan: %s', e)
         return None
@@ -138,25 +141,18 @@ def check_rugcheck(token_address):
         logging.warning('RugCheck API URL not configured.')
         return False
 
-    # Prepare request parameters
-    params = {
-        'token_address': token_address
-    }
-
-    # Add authentication if required
-    headers = {}
-    # Example: headers['Authorization'] = f'Bearer {RUGCHECK.get("api_key")}'
-
     try:
-        response = requests.get(api_url, params=params, headers=headers)
+        response = requests.get(api_url(token_address))
         if response.status_code == 200:
             data = response.json()
-            status = data.get('status', '').lower()
+
+            # TODO: Implement custom logic based on RugCheck data
+            """ status = data.get('status', '').lower()
             if status == 'good':
                 return True
             else:
                 logging.info('Token %s is marked as %s on RugCheck.', token_address, status)
-                return False
+                return False """
         else:
             logging.error('RugCheck API error: %s', response.status_code)
             return False

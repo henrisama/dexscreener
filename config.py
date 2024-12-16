@@ -1,4 +1,7 @@
 # config.py
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
 DATABASE = {
     'drivername': 'postgresql',
@@ -9,7 +12,7 @@ DATABASE = {
     'database': 'dexscreenerdb'    
 }
 
-API_URL = 'https://api.dexscreener.com/token-profiles/latest/v1'  # Replace with the actual API endpoint
+API_URL = 'https://api.dexscreener.com/token-profiles/latest/v1' 
 
 # Filters
 FILTERS = {
@@ -39,7 +42,7 @@ POCKET_UNIVERSE = {
 # RugCheck.xyz API Configuration
 RUGCHECK = {
     'enabled': True,
-    'api_url': 'https://api.rugcheck.xyz/check',
+    'api_url': lambda x : f'https://api.rugcheck.xyz/v1/tokens/{x}/report/summary',
 }
 
 # Telegram Bot Configuration
@@ -60,4 +63,8 @@ TRADING = {
     'enabled': True,
     'trade_amount': 0.1,  # Amount in ETH or the base currency to use for trades
     # Additional trading parameters
+}
+
+SOLANA = {
+    url: os.getenv('URL_SOLANA'),
 }
