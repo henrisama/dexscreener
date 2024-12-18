@@ -132,32 +132,67 @@ def get_developer_address(token_address):
         return None
 
 def check_rugcheck(token_address):
-    """Check the token on RugCheck.xyz."""
-    if not RUGCHECK.get('enabled', False):
-        return True  # Assume good if RugCheck is disabled
+    """Verifica a confiabilidade de um token no RugCheck.xyz.
 
-    api_url = RUGCHECK.get('api_url')
-    if not api_url:
-        logging.warning('RugCheck API URL not configured.')
-        return False
+    Args:
+        token_address (str): O endereço do token a ser verificado.
+
+    Returns:
+        bool: True se o token for considerado bom, False caso contrário.
+    """
+    # Verifica se o RugCheck está habilitado
+    if not RUGCHECK.get('enabled', False):
+        logging.info('RugCheck está desabilitado. Assumindo que o token é bom.')
+        return True  # Assume que o token é bom se RugCheck estiver desabilitado
+
+    api_url_template = RUGCHECK.get('api_url')
+    if not api_url_template:
+        logging.warning('URL da API do RugCheck não está configurada.')
+        return False  # Retorna False se a URL da API não estiver configurada
+
+    # Formata a URL da API com o endereço do token
+    api_url = api_url_template.format(mint=token_address)
 
     try:
-        response = requests.get(api_url(token_address))
+        # Realiza a requisição GET à API do RugCheck
+        response = requests.get(api_url, timeout=10)  # Define um timeout para evitar esperas indefinidas
         if response.status_code == 200:
             data = response.json()
 
-            # TODO: Implement custom logic based on RugCheck data
-            """ status = data.get('status', '').lower()
-            if status == 'good':
-                return True
-            else:
-                logging.info('Token %s is marked as %s on RugCheck.', token_address, status)
-                return False """
+            # Extrai o score total do token
+            total_score = data.get('score', 0)
+
+            # Verifica se o score total excede o limite definido
+            if total_score > 5000:
+                logging.info('Token %s possui um score total alto (%d). Considerado como "trash".', token_address, total_score)
+                return False
+
+            # Itera sobre os riscos para identificar riscos críticos
+            for risco in data.get('risks', []):
+                nome = risco.get('name', '').lower()
+                nivel = risco.get('level', '').lower()
+
+                # Ignora riscos específicos que podem ser "passados pano"
+                if nome in ['copycat token', 'low amount of lp providers']:
+                    logging.debug('Risco "%s" identificado, mas será ignorado.', risco.get('name'))
+                    continue
+
+                # Considera o token como ruim se houver riscos de nível "danger"
+                if nivel == 'danger':
+                    logging.info('Token %s possui risco crítico: "%s". Considerado como "trash".', token_address, risco.get('name'))
+                    return False
+
+            # Se nenhum risco crítico for encontrado e o score estiver abaixo do limite, considera o token como bom
+            logging.info('Token %s passou na verificação do RugCheck. Considerado como bom.', token_address)
+            return True
         else:
-            logging.error('RugCheck API error: %s', response.status_code)
+            logging.error('Erro na API do RugCheck: Código de status %s.', response.status_code)
             return False
-    except Exception as e:
-        logging.error('Error checking RugCheck API: %s', e)
+    except requests.exceptions.RequestException as e:
+        logging.error('Erro ao verificar a API do RugCheck: %s', e)
+        return False
+    except ValueError as e:
+        logging.error('Erro ao processar a resposta JSON da API do RugCheck: %s', e)
         return False
 
 def check_bundled_supply(coin):
