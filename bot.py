@@ -1,5 +1,5 @@
 # bot.py
-
+import base64
 import requests
 import pandas as pd
 import logging
@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine.url import URL
 from datetime import datetime
-from config import (DATABASE, API_URL, FILTERS, COIN_BLACKLIST, DEV_BLACKLIST,
+from config import (DATABASE, DEXSCREENER, FILTERS, COIN_BLACKLIST, DEV_BLACKLIST,
                     POCKET_UNIVERSE, RUGCHECK, TELEGRAM, BONKBOT, TRADING, SOLANA)
 import sys
 import time
@@ -96,11 +96,13 @@ def create_tables(engine):
 def fetch_data():
     """Fetch data from the Dexscreener API."""
     try:
+        API_URL = DEXSCREENER.get('api_url')
         response = requests.get(API_URL)
         if response.status_code == 200:
             logging.info('Data fetched successfully from Dexscreener.')
             data = response.json()
-            return { 'tokens': data }
+            tokens = [token for token in data if token.get('chainId') == 'solana']
+            return {'tokens': tokens}
         else:
             logging.error('Failed to fetch data: %s', response.status_code)
             return None
@@ -108,38 +110,59 @@ def fetch_data():
         logging.error('Exception occurred while fetching data: %s', e)
         return None
 
-def get_developer_address(token_address):
+# Metaplex Metadata Program ID
+METAPLEX_PROGRAM_ID = PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")
+
+def find_metadata_pda(mint: PublicKey) -> PublicKey:
+    seeds = [
+        b"metadata",
+        bytes(METAPLEX_PROGRAM_ID),
+        bytes(mint)
+    ]
+    metadata_pda, _ = PublicKey.find_program_address(seeds, METAPLEX_PROGRAM_ID)
+    return metadata_pda
+
+def get_developer_address(mint_address):
     try:
         client = Client(SOLANA.get('url'))
 
-        # Validate and create a PublicKey object
-        contract_pubkey = PublicKey(token_address)
+        try:
+            mint_pubkey = PublicKey(mint_address)
+        except ValueError:
+            logging.error("Invalid mint address provided.")
 
-        # Fetch account information
-        response = client.get_account_info(contract_pubkey)
+        metadata_pda = find_metadata_pda(mint_pubkey)
 
-        if not response['result']['value']:
-            logging.error(f"Error: No account found for address {contract_address}")
-            return None
-        
-         # Extract owner information
-        owner_pubkey = response['result']['value']['owner']
+        # Fetch the account info for the metadata PDA
+        response = client.get_account_info(metadata_pda)
+        account_info = response.get('result', {}).get('value')
 
-        logging.info(f"Owner of contract {contract_address}: {owner_pubkey}")
-        return owner_pubkey
+        if not account_info:
+            logging.error("Metadata account not found for the given mint address.")
+
+        # The account data is returned as a list where the first element is the base64-encoded data
+        data_base64 = account_info.get('data', [])[0]
+        if not data_base64:
+            logging.error("No data found in the metadata account.")
+
+        # Decode the base64 data
+        try:
+            decoded_data = base64.b64decode(data_base64)
+        except base64.binascii.Error:
+            logging.error("Failed to decode account data.")
+
+        # The 'update_authority' is located at bytes 1 to 33 (32 bytes)
+        try:
+            update_authority_bytes = decoded_data[1:33]
+            update_authority_pubkey = PublicKey(update_authority_bytes)
+            return str(update_authority_pubkey)
+        except Exception as e:
+            logging.error(f"Failed to extract update authority: {e}")
     except Exception as e:
         logging.error('Error fetching developer address from Solscan: %s', e)
         return None
 
 def check_rugcheck(token_address):
-    """Verifica a confiabilidade de um token no RugCheck.xyz.
-
-    Args:
-        token_address (str): O endereço do token a ser verificado.
-
-    Returns:
-        bool: True se o token for considerado bom, False caso contrário.
-    """
     # Verifica se o RugCheck está habilitado
     if not RUGCHECK.get('enabled', False):
         logging.info('RugCheck está desabilitado. Assumindo que o token é bom.')
@@ -151,7 +174,7 @@ def check_rugcheck(token_address):
         return False  # Retorna False se a URL da API não estiver configurada
 
     # Formata a URL da API com o endereço do token
-    api_url = api_url_template.format(mint=token_address)
+    api_url = api_url_template(token_address)
 
     try:
         # Realiza a requisição GET à API do RugCheck
@@ -195,32 +218,36 @@ def check_rugcheck(token_address):
         logging.error('Erro ao processar a resposta JSON da API do RugCheck: %s', e)
         return False
 
-def check_bundled_supply(coin):
-    """Check if the coin's supply is bundled using Solscan API."""
-    token_address = coin.get('address', '')
-    SOLSCAN_HOLDERS_URL = 'https://public-api.solscan.io/token/holders'
-    
-    params = {
-        'tokenAddress': token_address,
-        'limit': 100  # Adjust as needed
-    }
-
+def check_bundled_supply(mint_address):
     try:
-        response = requests.get(SOLSCAN_HOLDERS_URL, params=params)
-        if response.status_code == 200:
-            data = response.json()
-            total_supply = float(coin.get('totalSupply', 0))
+        client = Client(SOLANA.get('url'))
+
+        try:
+            mint_pubkey = PublicKey(mint_address)
+        except ValueError:
+            logging.error("Invalid mint address provided.")
+
+        # Fetch top holders
+        response = client.get_token_largest_accounts(mint_pubkey)
+
+        # Fetch total supply
+        supply = client.get_token_supply(mint_pubkey).get('result', {}).get('value', {}).get('amount', 0)
+
+        if response and response.get('result') and supply:
+            data = response.get('result').get('value', [])
+            total_supply = float(supply)
+
             if total_supply == 0:
                 return False  # Cannot determine without total supply
 
             # Calculate percentage of supply held by top holders
-            top_holders_supply = sum(float(holder['balance']) for holder in data[:5])
+            top_holders_supply = sum(float(holder['amount']) for holder in data[:5])
             percentage = (top_holders_supply / total_supply) * 100
 
             if percentage > 50:  # If top 5 holders hold more than 50%
                 return True  # Bundled supply detected
         else:
-            logging.error('Solscan API error while fetching holders: %s', response.status_code)
+            logging.error('Error while fetching holders or supply:\nResponse: %s\nSupply: %s', response, supply)
             return False
     except Exception as e:
         logging.error('Exception in check_bundled_supply: %s', e)
@@ -229,7 +256,7 @@ def check_bundled_supply(coin):
     return False
 
 def check_fake_volume(coin):
-    """Check if the coin has fake volume using an algorithm and/or Pocket Universe API."""
+    """Check if the coin has fake volume using an algorithm"""
     # Algorithmic Check
     volume_24h = coin.get('volume', {}).get('h24', 0)
     market_cap = coin.get('fdv', 0)
@@ -258,45 +285,6 @@ def check_fake_volume(coin):
     if volume_24h > FILTERS.get('min_volume_24h', 0) and abs(price_change_24h) < 1:
         logging.info('Coin %s has high volume but minimal price change. Suspected fake volume.', coin.get('address'))
         return True
-
-    # Pocket Universe API Check
-    if POCKET_UNIVERSE.get('enabled', False):
-        is_scam = check_pocket_universe(coin.get('address'))
-        if is_scam:
-            logging.info('Coin %s identified as scam by Pocket Universe.', coin.get('address'))
-            return True
-
-    return False
-
-def check_pocket_universe(token_address):
-    """Check if the coin is flagged as a scam using Pocket Universe API."""
-    api_key = POCKET_UNIVERSE.get('api_key')
-    api_url = POCKET_UNIVERSE.get('api_url')
-
-    if not api_key or not api_url:
-        logging.warning('Pocket Universe API key or URL not configured.')
-        return False
-
-    headers = {
-        'Authorization': f'Bearer {api_key}'
-    }
-
-    params = {
-        'tokenAddress': token_address
-    }
-
-    try:
-        response = requests.get(api_url, headers=headers, params=params)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('isScam', False):
-                return True
-        else:
-            logging.error('Pocket Universe API error: %s', response.status_code)
-            return False
-    except Exception as e:
-        logging.error('Error checking Pocket Universe API: %s', e)
-        return False
 
     return False
 
@@ -514,4 +502,9 @@ def main():
         sys.exit(1)
 
 if __name__ == '__main__':
-    main()
+    #main()
+    #print(get_developer_address('458ssY4UQyH2tp2Xb4GaGGu1LERh4bhRMaG6B3hKQ9nA'))
+    #print(len(fetch_data().get('tokens')))
+    print(fetch_data().get('tokens')[0])
+    #print(check_rugcheck('458ssY4UQyH2tp2Xb4GaGGu1LERh4bhRMaG6B3hKQ9nA'))
+    #print(check_bundled_supply('458ssY4UQyH2tp2Xb4GaGGu1LERh4bhRMaG6B3hKQ9nA'))

@@ -5,21 +5,22 @@ load_dotenv()
 
 DATABASE = {
     'drivername': 'postgresql',
-    'host': 'localhost',
-    'port': '5432',
-    'username': 'postgres',    
-    'password': '1234',    
-    'database': 'dexscreenerdb'    
+    'host': os.getenv('DB_HOST'),
+    'port': os.getenv('DB_PORT'),
+    'username': os.getenv('DB_USER'),    
+    'password': os.getenv('DB_PASS'),    
+    'database': os.getenv('DB_NAME'),   
 }
 
-API_URL = 'https://api.dexscreener.com/token-profiles/latest/v1' 
+DEXSCREENER = {
+    'api_url': 'https://api.dexscreener.com/token-profiles/latest/v1',
+}
 
 # Filters
 FILTERS = {
     'min_market_cap': 1_000_000,     # Minimum market cap in USD
     'min_volume_24h': 10_000,        # Minimum 24h volume in USD
     'max_volume_market_cap_ratio': 1,  # Maximum acceptable volume-to-market cap ratio
-    # Add other filters as required
 }
 
 # Coin Blacklist (list of token addresses to ignore)
@@ -47,24 +48,22 @@ RUGCHECK = {
 
 # Telegram Bot Configuration
 TELEGRAM = {
-    'bot_token': 'your_telegram_bot_token',  # Replace with your Telegram bot token
-    'chat_id': 'your_chat_id',  # Replace with your Telegram chat ID
+    'bot_token': 'your_telegram_bot_token',
+    'chat_id': 'your_chat_id',
 }
 
 # BonkBot Configuration
 BONKBOT = {
     'enabled': True,
-    'username': 'BonkBot',  # BonkBot's Telegram username
-    # Additional configuration if required
+    'username': 'BonkBot',
 }
 
 # Trading Configuration
 TRADING = {
     'enabled': True,
-    'trade_amount': 0.1,  # Amount in ETH or the base currency to use for trades
-    # Additional trading parameters
+    'trade_amount': 0.005 # ~1 USD in SOL
 }
 
 SOLANA = {
-    url: os.getenv('URL_SOLANA'),
+    'url': os.getenv('RPC_SOLANA'),
 }
