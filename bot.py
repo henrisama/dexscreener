@@ -78,7 +78,6 @@ def create_tables(engine):
                   Column('price', Float),
                   Column('price_change_1h', Float),
                   Column('price_change_24h', Float),
-                  Column('price_change_7d', Float),
                   Column('volume_24h', Float),
                   Column('market_cap', Float),
                   Column('developer', String),
@@ -96,7 +95,7 @@ def create_tables(engine):
 def fetch_data():
     """Fetch data from the Dexscreener API."""
     try:
-        API_URL = DEXSCREENER.get('api_url')
+        API_URL = DEXSCREENER.get('latest')
         response = requests.get(API_URL)
         if response.status_code == 200:
             logging.info('Data fetched successfully from Dexscreener.')
@@ -292,7 +291,7 @@ def apply_filters(coin):
     """Apply filters to determine if the coin should be processed."""
     market_cap = coin.get('fdv', 0)
     volume_24h = coin.get('volume', {}).get('h24', 0)
-    token_address = coin.get('address', '').lower()
+    token_address = coin.get('tokenAddress', '')
 
     # Convert values to floats
     try:
@@ -318,7 +317,7 @@ def apply_filters(coin):
         return False
 
     # Check for Bundled Supply
-    if check_bundled_supply(coin):
+    if check_bundled_supply(token_address):
         logging.info('Coin %s has bundled supply. Adding to blacklists and skipping...', token_address)
         # Add to blacklists
         COIN_BLACKLIST.add(token_address)
@@ -376,6 +375,44 @@ def detect_events(coin):
 
     return event
 
+def get_token_data(token_address):
+    """Get token data from Dexscreener API."""
+    try:
+        API_URL = DEXSCREENER.get('pairs')
+
+        response = requests.get(f"{API_URL}/{token_address}")
+
+        if response and response.status_code == 200:
+            data = response.json()
+            pairs = data.get('pairs', [])
+
+            if pairs:
+                oldest_pair = min(pairs, key=lambda x: x.get('pairCreatedAt', float('inf')))
+                token_data = {
+                    'token_address': token_address,
+                    'name': oldest_pair.get('baseToken', {}).get('name'),
+                    'symbol': oldest_pair.get('baseToken', {}).get('symbol'),
+                    'price': oldest_pair.get('priceUsd', 0),
+                    'priceChange': {
+                        'h1': oldest_pair.get('priceChange', {}).get('h1', 0),
+                        'h24': oldest_pair.get('priceChange', {}).get('h24', 0)
+                    },
+                    'volume': {
+                        'h24': oldest_pair.get('volume', 0).get('h24', 0)
+                    },
+                    'fdv': oldest_pair.get('fdv', 0)
+                }
+                return token_data
+            else:
+                logging.error('No pairs found for token %s.', token_address)
+                return None
+        else:
+            logging.error('Failed to fetch token data: %s', response.status_code)
+            return None
+    except Exception as e:
+        logging.error('Exception occurred while fetching token data: %s', e)
+        return None
+
 def send_telegram_message(message):
     """Send a message via Telegram."""
     try:
@@ -424,7 +461,12 @@ def process_data(data, engine):
     processed_tokens = []
 
     for token in tokens:
-        token_address = token.get('address', '').lower()
+        token_address = token.get('tokenAddress', '')
+
+        # Fetch additional token data
+        token_data = get_token_data(token_address)
+
+        token = {**token, **token_data}
 
         # Apply Filters and Blacklists
         if not apply_filters(token):
@@ -439,7 +481,6 @@ def process_data(data, engine):
             'price': token.get('price', 0),
             'price_change_1h': token.get('priceChange', {}).get('h1', 0),
             'price_change_24h': token.get('priceChange', {}).get('h24', 0),
-            'price_change_7d': token.get('priceChange', {}).get('d7', 0),
             'volume_24h': token.get('volume', {}).get('h24', 0),
             'market_cap': token.get('fdv', 0),
             'developer': developer_address,
@@ -503,8 +544,4 @@ def main():
 
 if __name__ == '__main__':
     #main()
-    #print(get_developer_address('458ssY4UQyH2tp2Xb4GaGGu1LERh4bhRMaG6B3hKQ9nA'))
-    #print(len(fetch_data().get('tokens')))
-    print(fetch_data().get('tokens')[0])
-    #print(check_rugcheck('458ssY4UQyH2tp2Xb4GaGGu1LERh4bhRMaG6B3hKQ9nA'))
-    #print(check_bundled_supply('458ssY4UQyH2tp2Xb4GaGGu1LERh4bhRMaG6B3hKQ9nA'))
+    print(get_developer_address('CABaL6zWjHC1XELeMT13CqW64iokTT25xNF1NUXkwJ5S'))

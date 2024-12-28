@@ -13,7 +13,8 @@ DATABASE = {
 }
 
 DEXSCREENER = {
-    'api_url': 'https://api.dexscreener.com/token-profiles/latest/v1',
+    'latest': 'https://api.dexscreener.com/token-profiles/latest/v1',
+    'pairs': 'https://api.dexscreener.com/latest/dex/tokens'
 }
 
 # Filters
@@ -54,13 +55,13 @@ TELEGRAM = {
 
 # BonkBot Configuration
 BONKBOT = {
-    'enabled': True,
+    'enabled': False,
     'username': 'BonkBot',
 }
 
 # Trading Configuration
 TRADING = {
-    'enabled': True,
+    'enabled': False,
     'trade_amount': 0.005 # ~1 USD in SOL
 }
 
