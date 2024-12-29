@@ -1,14 +1,15 @@
 # bot.py
 import base64
+import base58
 import requests
 import pandas as pd
 import logging
-from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Float, DateTime
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String, Float, DateTime, Boolean
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine.url import URL
 from datetime import datetime
 from config import (DATABASE, DEXSCREENER, FILTERS, COIN_BLACKLIST, DEV_BLACKLIST,
-                    POCKET_UNIVERSE, RUGCHECK, TELEGRAM, BONKBOT, TRADING, SOLANA)
+                    RUGCHECK, TELEGRAM, BONKBOT, TRADING, SOLANA, WALLET)
 import sys
 import time
 import os
@@ -18,6 +19,13 @@ from telegram import Bot  # python-telegram-bot library
 from solana.rpc.api import Client
 from solana.publickey import PublicKey
 from solana.rpc.core import RPCException
+from solana.transaction import Transaction
+from solana.system_program import TransferParams, transfer
+from solana.rpc.async_api import AsyncClient
+from solana.keypair import Keypair
+from solana.rpc.types import TxOpts
+
+import asyncio
 
 # Setup Logging
 logging.basicConfig(filename='bot.log', level=logging.INFO, 
@@ -82,7 +90,8 @@ def create_tables(engine):
                   Column('market_cap', Float),
                   Column('developer', String),
                   Column('timestamp', DateTime, default=datetime.utcnow),
-                  Column('event_type', String)
+                  Column('event_type', String),
+                  Column('is_held', Boolean, default=False)
                   )
 
     try:
@@ -321,7 +330,8 @@ def apply_filters(coin):
         logging.info('Coin %s has bundled supply. Adding to blacklists and skipping...', token_address)
         # Add to blacklists
         COIN_BLACKLIST.add(token_address)
-        if developer_address:
+        # Add developer to blacklist if is not the pump developer
+        if developer_address and developer_address.lower() != 'tslvdd1pwphvjahspsvcxubgwsl3jacvokwakt1eokm':
             DEV_BLACKLIST.add(developer_address.lower())
         return False
 
@@ -398,7 +408,7 @@ def get_token_data(token_address):
                         'h24': oldest_pair.get('priceChange', {}).get('h24', 0)
                     },
                     'volume': {
-                        'h24': oldest_pair.get('volume', 0).get('h24', 0)
+                        'h24': oldest_pair.get('volume', {}).get('h24', 0)
                     },
                     'fdv': oldest_pair.get('fdv', 0)
                 }
@@ -421,37 +431,7 @@ def send_telegram_message(message):
     except Exception as e:
         logging.error('Error sending Telegram message: %s', e)
 
-def trade_token(token_address, action):
-    """Trade the token using BonkBot via Telegram."""
-    if not BONKBOT.get('enabled', False):
-        logging.info('BonkBot trading is disabled.')
-        return
-
-    bonkbot_username = BONKBOT.get('username', 'BonkBot')
-    trade_amount = TRADING.get('trade_amount', 0.1)
-    command = ''
-
-    if action == 'buy':
-        command = f'/buy {token_address} {trade_amount}'
-    elif action == 'sell':
-        command = f'/sell {token_address} {trade_amount}'
-    else:
-        logging.error('Invalid trade action: %s', action)
-        return
-
-    try:
-        # Send command to BonkBot
-        telegram_bot.send_message(chat_id=bonkbot_username, text=command)
-        logging.info('Sent trade command to BonkBot: %s', command)
-
-        # Notify user
-        send_telegram_message(f'Trade executed: {action.upper()} {trade_amount} of token {token_address}')
-
-    except Exception as e:
-        logging.error('Error trading token via BonkBot: %s', e)
-        send_telegram_message(f'Error executing trade: {e}')
-
-def process_data(data, engine):
+async def process_data(data, engine):
     """Process and store data in the database."""
     if not data or 'tokens' not in data:
         logging.error('No data to process.')
@@ -485,7 +465,8 @@ def process_data(data, engine):
             'market_cap': token.get('fdv', 0),
             'developer': developer_address,
             'timestamp': datetime.utcnow(),
-            'event_type': None
+            'event_type': None,
+            'is_held': False
         }
 
         # Detect events
@@ -497,12 +478,13 @@ def process_data(data, engine):
             # Execute trade based on event
             if TRADING.get('enabled', False):
                 if event == 'pump':
-                    trade_token(token_address, 'buy')
-                elif event == 'rug_pull':
-                    trade_token(token_address, 'sell')
+                    # Buy token
+                    await buy_token(token_address)
+                    coin_data['is_held'] = True
                 # Add more conditions as needed
 
-        processed_tokens.append(coin_data)
+        if coin_data['event_type'] == 'pump':
+            processed_tokens.append(coin_data)
 
     if not processed_tokens:
         logging.info('No coins met the criteria after filtering.')
@@ -519,7 +501,196 @@ def process_data(data, engine):
     except Exception as e:
         logging.error('Error storing data: %s', e)
 
-def main():
+def fetch_held_tokens(engine):
+    """Fetch tokens that are currently held (bought and not yet sold)."""
+    metadata = MetaData(bind=engine)
+    coins_table = Table('coins', metadata, autoload_with=engine)
+
+    with engine.connect() as connection:
+        query = coins_table.select().where(coins_table.c.is_held == True)
+        result = connection.execute(query)
+        held_tokens = result.fetchall()
+
+    return held_tokens
+
+async def process_held_tokens(engine):
+    """Process held tokens to check for rug_pull events and sell if necessary."""
+    held_tokens = fetch_held_tokens(engine)
+    if not held_tokens:
+        logging.info('No held tokens to process.')
+        return
+
+    for token_record in held_tokens:
+        token_address = token_record['token_address']
+        symbol = token_record['symbol']
+        logging.info('Processing held token: %s (%s)', symbol, token_address)
+
+        # Fetch current token data
+        token_data = get_token_data(token_address)
+        if not token_data:
+            logging.error('Failed to fetch data for held token: %s', token_address)
+            continue
+
+        # Detect current events
+        current_event = detect_events(token_data)
+
+        if current_event == 'rug_pull':
+            # Execute sell action
+            await sell_token(token_address)
+
+            # Update the database to mark the token as not held
+            metadata = MetaData(bind=engine)
+            coins_table = Table('coins', metadata, autoload_with=engine)
+
+            update_stmt = coins_table.update().where(
+                coins_table.c.token_address == token_address
+            ).values(
+                is_held=False,
+                event_type='rug_pull'
+            )
+
+            try:
+                with engine.connect() as connection:
+                    connection.execute(update_stmt)
+                    logging.info('Sold held token: %s (%s) due to rug_pull event.', symbol, token_address)
+                    # Notify via Telegram
+                    send_telegram_message(f'Sold token {symbol} ({token_address}) due to rug_pull detection.')
+            except Exception as e:
+                logging.error('Error updating held token status: %s', e)
+        else:
+            logging.info('No rug_pull event detected for held token: %s (%s)', symbol, token_address)
+
+def load_wallet():
+    """Carrega a carteira a partir de um arquivo JSON."""
+    try:
+        secret_key = WALLET.get('secret_key', '')
+        keypair = Keypair.from_secret_key(base58.b58decode(secret_key))
+
+        return keypair
+            
+    except Exception as e:
+        logging.error('Erro ao carregar a carteira: %s', e)
+
+async def get_token_balance(token_mint_address):
+    try:
+        # Inicializa o cliente da API Solana
+        client = Client(SOLANA.get('url'))
+
+        # Carrega a carteira
+        wallet = load_wallet()
+        token_mint_pubkey = PublicKey(token_mint_address)
+
+        # Obter todas as contas de token associadas à carteira
+        response = await client.get_token_accounts_by_owner(wallet.public_key)
+        token_accounts = response['result']['value']
+        total_balance = 0
+
+        for account in token_accounts:
+            account_pubkey = account['pubkey']
+            balance_response = await client.get_token_account_balance(account_pubkey)
+            balance = balance_response['result']['value']['uiAmount']
+            total_balance += balance
+
+        return total_balance
+    except Exception as e:
+        logging.error('Erro ao obter saldo do token %s: %s', token_mint_address, e)
+        return 0
+
+
+async def buy_token(token_mint_address):
+    try:
+        # Inicializa o cliente da API Solana
+        client = Client(SOLANA.get('url'))
+
+        # Define o valor da compra. Pode ser configurado no arquivo de configuração.
+        amount = TRADING.get('trade_amount', 0.005)  # Valor padrão de 0.005 SOL (~1 USD)
+
+        # Carrega a carteira
+        wallet = load_wallet()
+
+        # Defina o destinatário como o endereço do DEX ou contrato de swap
+        dex_address = PublicKey("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")
+
+        # Crie uma transação de transferência
+        transaction = Transaction().add(
+            transfer(
+                TransferParams(
+                    from_pubkey=wallet.public_key,
+                    to_pubkey=dex_address,
+                    lamports=int(amount * 1e9)  # Convertendo SOL para lamports (1 SOL = 1e9 lamports)
+                )
+            )
+        )
+
+        # Envie a transação
+        response = await client.send_transaction(transaction, wallet, opts=TxOpts(preflight_commitment="confirmed"))
+        logging.info(f'Compra executada com sucesso. TxID: {response["result"]}')
+        send_telegram_message(f'Compra executada: {amount} SOL para {token_mint_address}. TxID: {response["result"]}')
+    except Exception as e:
+        logging.error('Erro ao comprar token: %s', e)
+        send_telegram_message(f'Erro ao comprar token: {e}')
+
+async def sell_token(token_mint_address):
+    try:
+        # Inicializa o cliente da API Solana
+        client = Client(SOLANA.get('url'))
+
+        # Carrega a carteira
+        wallet = load_wallet()
+
+        # Obter o saldo total do token
+        total_balance = await get_token_balance(token_mint_address)
+
+        if total_balance <= 0:
+            logging.info('Nenhum token para vender: %s', token_mint_address)
+            return
+
+        # Defina o destinatário como o endereço do DEX ou contrato de swap
+        dex_address = PublicKey("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")  # Substitua pelo endereço real
+
+        # Obter a conta de token associada para enviar
+        response = await client.get_token_accounts_by_owner(wallet.public_key, mint=PublicKey(token_mint_address))
+        token_accounts = response['result']['value']
+
+        if not token_accounts:
+            logging.error('Nenhuma conta de token encontrada para %s.', token_mint_address)
+            return
+
+        # Usaremos a primeira conta de token para vender
+        token_account_pubkey = PublicKey(token_accounts[0]['pubkey'])
+
+        # Obter a conta de token do DEX (deve ser pré-configurada)
+        dex_token_account = PublicKey("ENDEREÇO_DA_CONTA_DE_TOKEN_DO_DEX")  # Substitua pelo endereço real
+
+        # Determinar o número de decimais do token (ajuste conforme necessário)
+        # Exemplo: USDC tem 6 decimais
+        token_decimals = 6  # Substitua pelo número real de decimais do token
+
+        # Converter o saldo para a quantidade de lamports do token
+        # Exemplo: Se o token tem 6 decimais, 1 token = 1_000_000 lamports
+        lamports = int(total_balance * (10 ** token_decimals))
+
+        # Crie uma transação de transferência de token SPL
+        transaction = Transaction().add(
+            transfer(
+                TransferParams(
+                    from_pubkey=token_account_pubkey,
+                    to_pubkey=dex_token_account,
+                    lamports=lamports  # Convertendo tokens para lamports
+                )
+            )
+        )
+
+        # Envie a transação
+        response = await client.send_transaction(transaction, wallet, opts=TxOpts(preflight_commitment="confirmed"))
+        tx_id = response["result"]
+        logging.info(f'Venda executada com sucesso. TxID: {tx_id}')
+        send_telegram_message(f'Venda executada: {total_balance} tokens de {token_mint_address}. TxID: {tx_id}')
+    except Exception as e:
+        logging.error('Erro ao vender token: %s', e)
+        send_telegram_message(f'Erro ao vender token: {e}')
+
+async def main():
     engine = get_engine()
     create_tables(engine)
     load_blacklists()
@@ -528,11 +699,14 @@ def main():
         while True:
             data = fetch_data()
             if data:
-                process_data(data, engine)
+                await process_data(data, engine)
+
+                # Process held tokens
+                await process_held_tokens(engine)
             else:
                 logging.error('No data fetched.')
             # Wait for 1 hour before next fetch
-            time.sleep(3600)
+            await asyncio.sleep(3600)
     except KeyboardInterrupt:
         save_blacklists()
         logging.info('Bot stopped by user.')
@@ -543,5 +717,4 @@ def main():
         sys.exit(1)
 
 if __name__ == '__main__':
-    #main()
-    print(get_developer_address('CABaL6zWjHC1XELeMT13CqW64iokTT25xNF1NUXkwJ5S'))
+    asyncio.run(main())

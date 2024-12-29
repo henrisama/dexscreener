@@ -12,6 +12,10 @@ DATABASE = {
     'database': os.getenv('DB_NAME'),   
 }
 
+WALLET = {
+    'secret_key': os.getenv('WALLET_SECRET_KEY'),
+}
+
 DEXSCREENER = {
     'latest': 'https://api.dexscreener.com/token-profiles/latest/v1',
     'pairs': 'https://api.dexscreener.com/latest/dex/tokens'
@@ -33,13 +37,6 @@ COIN_BLACKLIST = set([
 DEV_BLACKLIST = set([
     # Pre-populated with known bad developers
 ])
-
-# Pocket Universe API Configuration
-POCKET_UNIVERSE = {
-    'enabled': True,
-    'api_key': 'your_pocket_universe_api_key',
-    'api_url': 'https://api.pocketuniverse.app/v1/scams',
-}
 
 # RugCheck.xyz API Configuration
 RUGCHECK = {
