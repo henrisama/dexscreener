@@ -46,11 +46,6 @@ TELEGRAM = {
     'chat_id': os.getenv('TELEGRAM_CHAT_ID'),
 }
 
-BONKBOT = {
-    'enabled': False,
-    'username': 'BonkBot',
-}
-
 TRADING = {
     'enabled': False,
     'trade_amount': 0.005 # ~1 USD in SOL
