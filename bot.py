@@ -224,9 +224,9 @@ async def process_held_tokens(engine):
 
 
 async def main():
+    load_blacklists()
     engine = get_engine()
     create_tables(engine)
-    load_blacklists()
 
     try:
         while True:
